@@ -1,0 +1,21 @@
+# Ignore Python compiled files
+*.pyc
+*.pyo
+*.pyd
+*.spec
+__pycache__
+
+# Ignore test directory
+tests/
+
+# Ignore documentation directory
+docs/
+
+# Ignore build directory
+build/
+
+# Ignore dist directory
+dist/
+
+# Ignore .env files
+*.env
