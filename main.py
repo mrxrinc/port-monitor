@@ -9,7 +9,7 @@ TIMEOUT = 50
 class SerialPortWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Dometic | Serial Port Debugger')
+        self.setWindowTitle('Dometic | Serial Port Monitor')
         self.resize(1200, 1400)
         screen = QApplication.desktop().screenGeometry()
         self.resize(int(screen.width() // 1.5), int(screen.height() // 1.2))
