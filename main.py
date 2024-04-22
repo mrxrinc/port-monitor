@@ -1,8 +1,9 @@
+import usb.core
 import sys
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QTextEdit
 from PyQt5.QtCore import QTimer
-import serial
-from serial.tools.list_ports_osx import comports
+from serial import Serial
+from serial.tools.list_ports_windows import comports
 
 TIMEOUT = 50
 BAUD_RATE = 115200
@@ -13,7 +14,7 @@ class SerialPortWindow(QWidget):
         self.setWindowTitle('Dometic | Serial Port Monitor')
         self.resize(1200, 1400)
         screen = QApplication.desktop().screenGeometry()
-        self.resize(int(screen.width() // 1.5), int(screen.height() // 1.2))
+        self.resize(int(screen.width() // 2), int(screen.height() // 1.8))
 
         main_layout = QHBoxLayout(self)
 
@@ -44,7 +45,10 @@ class SerialPortWindow(QWidget):
 
         main_layout.addLayout(right_layout)
 
+        self.list_usb_devices()
+
         self.populate_serial_ports()
+        
 
     def on_combobox_changed(self):
         # Call start_serial_monitor with the currently selected port
@@ -76,9 +80,14 @@ class SerialPortWindow(QWidget):
             if not port:
                 return None
             self.port = port
-            self.serial_port = serial.Serial(port, baudrate=BAUD_RATE, timeout=TIMEOUT/1000)
-        except (serial.SerialException, AttributeError, OSError):
+            self.serial_port = Serial(port, baudrate=BAUD_RATE, timeout=TIMEOUT/1000)
+        except (AttributeError, OSError):
             self.serial_port = None
+
+    def list_usb_devices(self): # TODO: This function is not working
+        dev = usb.core.find(find_all=True)
+        for cfg in dev:
+            print('ID_VENDOR_ID=' + hex(cfg.idVendor) + ', ID_PRODUCT_ID=' + hex(cfg.idProduct))
 
     def logger(self):
         try:
@@ -96,7 +105,7 @@ class SerialPortWindow(QWidget):
                 if line:
                     self.log_text_edit.append(self.colorize_logs(line))
 
-        except (serial.SerialException, AttributeError, OSError):
+        except ( AttributeError, OSError):
             print('Serial port is not available.')
             self.log_text_edit.append('Serial port is not available.')
             self.serial_port = None
