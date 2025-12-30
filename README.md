@@ -9,17 +9,22 @@ Port Monitor is a tool that allows you to monitor specific ports on your system.
 recommended:
 
 ```bash
+source venv/bin/activate
+
+```
+
+```bash
 python -m PyInstaller \
   --windowed \
-  --icon=dometic-logo.icns \
-  -n PortMonitor \
+  --icon=icon.icns \
+  -n Port Monitor \
   main.py
 ```
 
 one file (not recommended):
 
 ```bash
-pyinstaller --windowed --onefile --icon=dometic-logo.icns -n DometicPortMonitor  main.py
+pyinstaller --windowed --onefile --icon=icon.icns -n 'PortMonitor'  main.py
 ```
 
 Author: Mohammad Mirzaei
