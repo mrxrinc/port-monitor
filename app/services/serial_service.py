@@ -1,7 +1,7 @@
 """Serial port management service."""
 
 import serial
-from serial.tools.list_ports_osx import comports
+import serial.tools.list_ports
 from typing import Dict, List, Optional, Callable
 from app.config import TIMEOUT
 
@@ -26,7 +26,7 @@ class SerialPortService:
         Returns:
             List of USB port device names
         """
-        all_ports = comports()
+        all_ports = serial.tools.list_ports.comports()
         return [
             port.device 
             for port in all_ports 
