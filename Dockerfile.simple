@@ -1,0 +1,52 @@
+# Simple Dockerfile for Linux build only
+# For Windows builds, use native Windows environment (see BUILD.md)
+
+FROM ubuntu:22.04
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    python3-dev \
+    libxcb-xinerama0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxkbcommon-x11-0 \
+    libdbus-1-3 \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir \
+    PyQt5-Qt5>=5.15.2 \
+    PyQt5-sip>=12.11.0 \
+    PyQt5>=5.15.0 \
+    pyserial>=3.5 \
+    pyinstaller
+
+# Copy application
+COPY . .
+
+# Build executable
+RUN pyinstaller \
+    --windowed \
+    --icon=icon.png \
+    --name 'PortMonitor' \
+    --clean \
+    main.py
+
+# Default command
+CMD ["/bin/bash"]
