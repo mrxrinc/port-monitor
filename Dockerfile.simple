@@ -21,7 +21,15 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon-x11-0 \
     libdbus-1-3 \
     libgl1-mesa-glx \
+    curl \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain to vendor a defmt-print binary for this platform
+ENV CARGO_HOME=/root/.cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN cargo install defmt-print
 
 WORKDIR /app
 
@@ -40,11 +48,16 @@ RUN pip3 install --no-cache-dir \
 # Copy application
 COPY . .
 
+# Vendor the linux defmt-print binary built above
+RUN mkdir -p vendor/defmt-print/linux-x86_64 && \
+    cp /root/.cargo/bin/defmt-print vendor/defmt-print/linux-x86_64/defmt-print
+
 # Build executable
 RUN pyinstaller \
     --windowed \
     --icon=icon.png \
     --name 'PortMonitor' \
+    --add-binary "vendor/defmt-print/linux-x86_64/defmt-print:vendor/defmt-print/linux-x86_64" \
     --clean \
     main.py
 
