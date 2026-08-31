@@ -18,7 +18,7 @@ A professional serial port monitoring application with CRC32 generation capabili
 
 ## Screenshots
 
-![Port Monitor Interface](screenshot/main-window.png)
+![Port Monitor Interface](screenshot/Screenshot.png)
 
 ## Installation
 
