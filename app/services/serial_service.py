@@ -108,6 +108,37 @@ class SerialPortService:
         
         return None
     
+    def read_raw_bytes(self, port_name: str) -> Optional[bytes]:
+        """
+        Read all currently available raw bytes from a serial port without decoding.
+        
+        Used for binary protocols (e.g. defmt) where data isn't newline-delimited text.
+        
+        Args:
+            port_name: Name of the port to read from
+            
+        Returns:
+            Raw bytes read, or None if no data or error
+        """
+        if port_name not in self.connections:
+            return None
+        
+        serial_port = self.connections[port_name]
+        
+        try:
+            if not serial_port.is_open:
+                return None
+            
+            if serial_port.in_waiting > 0:
+                data = serial_port.read(serial_port.in_waiting)
+                return data if data else None
+            
+        except (serial.SerialException, AttributeError, OSError):
+            self.close_port(port_name)
+            return None
+        
+        return None
+    
     def set_baud_rate(self, baud_rate: int) -> None:
         """
         Update baud rate for all connections.

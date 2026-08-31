@@ -1,12 +1,14 @@
 """Main application window."""
 
+import os
+import time
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
     QTextEdit, QPushButton, QListWidget, QFileDialog, QMessageBox, 
     QAction, QMenuBar, QApplication
 )
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QSettings
 from typing import Dict, List
 
 from app.config import (
@@ -15,9 +17,14 @@ from app.config import (
     PORT_LIST_WIDTH, LOG_FONT_SIZE, LOG_FONT_FAMILIES,
     WINDOW_WIDTH_RATIO, WINDOW_HEIGHT_RATIO, ESP32_REBOOT_DELAY
 )
-from app.services import CRCService, SerialPortService
+from app.services import CRCService, SerialPortService, DefmtDecoderService
+from app.services.defmt_service import looks_like_defmt_stream, find_elf_candidates, is_valid_elf
 from app.utils import LogFormatter
 from app.widgets import DropButton, ClickableLabel
+
+DEFMT_PROBE_MIN_BYTES = 32
+DEFMT_PROBE_WINDOW_BYTES = 64
+DEFMT_DISCOVERY_COOLDOWN_SECONDS = 5
 
 
 class MainWindow(QWidget):
@@ -30,12 +37,20 @@ class MainWindow(QWidget):
         # Initialize services
         self.serial_service = SerialPortService(DEFAULT_BAUD_RATE)
         self.crc_service = CRCService()
+        self.defmt_service = DefmtDecoderService()
         self.log_formatter = LogFormatter()
+        self.settings = QSettings('PortMonitor', 'PortMonitor')
         
         # State management
         self.port_logs: Dict[str, List[str]] = {}
         self.active_port: str = None
         self.auto_scroll: bool = True
+        
+        # defmt auto-detection state, keyed by port name
+        self.port_probe_buffer: Dict[str, bytes] = {}
+        self.port_text_buffer: Dict[str, bytes] = {}
+        self._elf_discovery_cooldown_until: float = 0.0
+        self._defmt_prompt_shown: Dict[str, bool] = {}
         
         # Setup UI
         self._setup_window()
@@ -53,7 +68,7 @@ class MainWindow(QWidget):
         )
     
     def _create_menu_bar(self):
-        """Create the menu bar with About menu."""
+        """Create the menu bar with a Help menu."""
         menubar = QMenuBar(self)
         menubar.setGeometry(0, 0, self.width(), 30)
         
@@ -289,6 +304,10 @@ class MainWindow(QWidget):
         for port in current_ports:
             if port not in ports:
                 self.serial_service.close_port(port)
+                self.defmt_service.stop(port)
+                self.port_probe_buffer.pop(port, None)
+                self.port_text_buffer.pop(port, None)
+                self._defmt_prompt_shown.pop(port, None)
                 
                 # Remove from list
                 for i in range(self.port_list.count()):
@@ -333,6 +352,12 @@ class MainWindow(QWidget):
         """Start monitoring a serial port."""
         success = self.serial_service.open_port(port)
         
+        # Reset defmt auto-detection state so a fresh connection is re-probed
+        self.defmt_service.stop(port)
+        self.port_probe_buffer.pop(port, None)
+        self.port_text_buffer.pop(port, None)
+        self._defmt_prompt_shown.pop(port, None)
+        
         if success:
             log_entry = self.log_formatter.create_success_message(
                 f'Connected to {port} at {self.serial_service.baud_rate} baud'
@@ -350,25 +375,144 @@ class MainWindow(QWidget):
             self.log_text_edit.append(log_entry)
     
     def _logger(self):
-        """Read and log data from all serial ports."""
+        """Read and log data from all serial ports, auto-detecting defmt streams."""
         for port_name in list(self.serial_service.connections.keys()):
-            line = self.serial_service.read_line(port_name)
+            if self.defmt_service.is_running(port_name):
+                self._pump_defmt_logs(port_name)
+                continue
             
+            raw_data = self.serial_service.read_raw_bytes(port_name)
+            if not raw_data:
+                continue
+            
+            # Keep a rolling window of recent bytes to continuously re-check for a
+            # switch to defmt (e.g. a device's plain-text bootloader output is
+            # followed by defmt-encoded logs once the application firmware starts).
+            probe = (self.port_probe_buffer.get(port_name, b'') + raw_data)[-DEFMT_PROBE_WINDOW_BYTES:]
+            self.port_probe_buffer[port_name] = probe
+            
+            if len(probe) >= DEFMT_PROBE_MIN_BYTES and looks_like_defmt_stream(probe) \
+                    and self._try_auto_enable_defmt(port_name):
+                self.defmt_service.write(port_name, probe)
+                self.port_probe_buffer.pop(port_name, None)
+                self.port_text_buffer.pop(port_name, None)
+                self._pump_defmt_logs(port_name)
+                continue
+            
+            self._process_text_bytes(port_name, raw_data)
+    
+    def _process_text_bytes(self, port_name: str, raw_data: bytes):
+        """Split buffered raw bytes into text log lines and display them."""
+        buffer = self.port_text_buffer.get(port_name, b'') + raw_data
+        *complete_lines, remainder = buffer.split(b'\n')
+        self.port_text_buffer[port_name] = remainder
+        
+        for raw_line in complete_lines:
+            line = raw_line.decode('utf-8', errors='ignore').strip()
             if line:
-                colorized_line = self.log_formatter.colorize_line(line)
-                
-                # Store in logs
-                if port_name not in self.port_logs:
-                    self.port_logs[port_name] = []
-                self.port_logs[port_name].append(colorized_line)
-                
-                # Display if active port
-                if self.active_port == port_name:
-                    self.log_text_edit.append(colorized_line)
-                    # Only auto-scroll if user hasn't scrolled up
-                    if self.auto_scroll:
-                        scrollbar = self.log_text_edit.verticalScrollBar()
-                        scrollbar.setValue(scrollbar.maximum())
+                self._append_log(port_name, self.log_formatter.colorize_line(line))
+    
+    def _try_auto_enable_defmt(self, port_name: str) -> bool:
+        """Silently enable defmt decoding for a port using a known or auto-discovered ELF."""
+        if not self.defmt_service.is_available():
+            return False
+        
+        # Each port is matched to its own firmware ELF - different boards run different
+        # firmware, and a defmt table only decodes the exact build it came from.
+        settings_prefix = f'defmt/ports/{port_name}'
+        
+        pinned_elf = self.settings.value(f'{settings_prefix}/elf_path', '')
+        if pinned_elf and is_valid_elf(pinned_elf):
+            return self._start_defmt(port_name, pinned_elf)
+        
+        project_root = self.settings.value(f'{settings_prefix}/project_root', '')
+        if project_root and os.path.isdir(project_root):
+            now = time.monotonic()
+            if now >= self._elf_discovery_cooldown_until:
+                self._elf_discovery_cooldown_until = now + DEFMT_DISCOVERY_COOLDOWN_SECONDS
+                candidates = find_elf_candidates(project_root)
+                if candidates:
+                    return self._start_defmt(port_name, candidates[0])
+            return False
+        
+        self._prompt_for_defmt_source(port_name)
+        return False
+    
+    def _start_defmt(self, port_name: str, elf_path: str) -> bool:
+        """Start the defmt decoder for a port and log that decoding kicked in."""
+        if not self.defmt_service.start(port_name, elf_path):
+            return False
+        
+        self._append_log(
+            port_name,
+            self.log_formatter.create_info_message(
+                f'Detected defmt-encoded log on {port_name}; decoding with {os.path.basename(elf_path)}'
+            )
+        )
+        return True
+    
+    def _prompt_for_defmt_source(self, port_name: str):
+        """
+        Ask, once per port, where to find the firmware ELF for defmt decoding.
+        
+        defmt strips format strings from the log stream entirely - they only exist in the
+        compiled ELF used at build time, so decoding is impossible without a copy of it.
+        Each port is asked separately since different boards run different firmware.
+        """
+        if self._defmt_prompt_shown.get(port_name):
+            return
+        self._defmt_prompt_shown[port_name] = True
+        
+        box = QMessageBox(self)
+        box.setWindowTitle("defmt-encoded log detected")
+        box.setText(
+            f"{port_name} appears to be sending defmt-encoded logs. These can only be decoded "
+            "using the exact compiled ELF file from the firmware build - the format strings "
+            "aren't sent over the wire."
+        )
+        folder_button = box.addButton("Project Folder...", QMessageBox.YesRole)
+        file_button = box.addButton("Exact ELF File...", QMessageBox.YesRole)
+        box.addButton("Skip", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        
+        settings_prefix = f'defmt/ports/{port_name}'
+        if clicked is folder_button:
+            folder = QFileDialog.getExistingDirectory(self, "Select Firmware Project Folder")
+            if folder:
+                self.settings.setValue(f'{settings_prefix}/project_root', folder)
+        elif clicked is file_button:
+            elf_path, _ = QFileDialog.getOpenFileName(self, "Select Firmware ELF File", "", "All Files (*)")
+            if elf_path and is_valid_elf(elf_path):
+                self.settings.setValue(f'{settings_prefix}/elf_path', elf_path)
+            elif elf_path:
+                QMessageBox.critical(self, "Error", "That file doesn't look like a valid ELF binary")
+    
+    def _pump_defmt_logs(self, port_name: str):
+        """Forward raw bytes to the port's defmt decoder and display decoded lines."""
+        raw_data = self.serial_service.read_raw_bytes(port_name)
+        if raw_data:
+            self.defmt_service.write(port_name, raw_data)
+        
+        for decoded_line in self.defmt_service.poll_lines(port_name):
+            colorized_line = self.log_formatter.colorize_defmt_line(decoded_line)
+            self._append_log(port_name, colorized_line)
+        
+        for error_line in self.defmt_service.poll_errors(port_name):
+            self._append_log(port_name, self.log_formatter.create_warning_message(error_line))
+    
+    def _append_log(self, port_name: str, log_entry: str):
+        """Store a log entry for a port and display it if that port is active."""
+        if port_name not in self.port_logs:
+            self.port_logs[port_name] = []
+        self.port_logs[port_name].append(log_entry)
+        
+        if self.active_port == port_name:
+            self.log_text_edit.append(log_entry)
+            # Only auto-scroll if user hasn't scrolled up
+            if self.auto_scroll:
+                scrollbar = self.log_text_edit.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
     
     def _clear_logs(self):
         """Clear logs for active port."""
@@ -506,5 +650,6 @@ class MainWindow(QWidget):
         if self.port_refresh_timer:
             self.port_refresh_timer.stop()
         
+        self.defmt_service.stop_all()
         self.serial_service.close_all_ports()
         event.accept()

@@ -39,6 +39,32 @@ class LogFormatter:
         # Return plain line if no color code found
         return line
     
+    # defmt-print log level prefixes
+    DEFMT_LEVEL_COLORS = {
+        'TRACE': 'gray',
+        'DEBUG': 'cyan',
+        'INFO': 'green',
+        'WARN': 'yellow',
+        'ERROR': 'red',
+    }
+    
+    @staticmethod
+    def colorize_defmt_line(line: str) -> str:
+        """
+        Apply HTML color formatting to a decoded defmt log line based on its level prefix.
+        
+        Args:
+            line: Decoded log line from defmt-print
+            
+        Returns:
+            HTML formatted line with color styling
+        """
+        for level, color in LogFormatter.DEFMT_LEVEL_COLORS.items():
+            if line.startswith(level):
+                return f'<p style="color:{color};">{line}</p>'
+        
+        return line
+    
     @staticmethod
     def create_success_message(message: str) -> str:
         """
